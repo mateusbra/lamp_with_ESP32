@@ -36,54 +36,12 @@
 
 static const char *TAG = "WiFi";
 
-int color_R = 8191;
+int color_R = 8191; //8191 = 255
 int color_G = 8191;
 int color_B = 8191;
-
-esp_err_t _http_event_handler(esp_http_client_event_t *evt)
-{
-    switch (evt->event_id)
-    {
-    case HTTP_EVENT_ON_DATA:
-        printf("HTTP_EVENT_ON_DATA: %.*s\n", evt->data_len, (char *)evt->data);
-		const char * buff = (char *)evt->data;
-		const cJSON * raw_data = NULL;
-		
-		//parse_json(buff, "rgb", data);
-		//printf("Data parsing: %s\n",data);
-		cJSON *_json = cJSON_Parse(buff);
-		raw_data = cJSON_GetObjectItemCaseSensitive(_json, "rgb");
-		
-		const char * data = (char *)raw_data->valuestring;
-		printf("Checking Color \"%s\"\n", data);
-		
-		//////////////////////////////////////////////////
-		char temp[3];
-		int temp_color = 0;
-		
-		for(int i = 0; i<3; i++)
-		{
-			strncpy ( temp, data+(i*2), 2);
-			temp_color = strtol(temp, NULL, 16);
-			if(i==0)
-				color_R = (8191 * temp_color)/255;
-			else if (i==1)
-				color_G = (8191 * temp_color)/255;
-			else
-				color_B = (8191 * temp_color)/255;
-		}
-		
-		//////////////////////////////////////////////////
-		
-		
-		cJSON_Delete(_json);
-        break;
-
-    default:
-        break;
-    }
-    return ESP_OK;   
-}
+uint8_t mode = 0;
+bool WiFi = 0;
+bool Light = 0;
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
@@ -92,11 +50,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) 
 	{
+		WiFi = 0;
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) 
 	{
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+		WiFi = 1;
     }
 }
 
@@ -140,56 +100,17 @@ static void wifi_connection()
     ESP_ERROR_CHECK(esp_http_client_cleanup(client));
 }*/
 
-void rest_get(){
-    
-    esp_http_client_config_t config_get = {
-      .url = "https://backendesp.vercel.app/getRgb",
-        .method = HTTP_METHOD_GET,
-        .cert_pem = NULL,
-        .event_handler = _http_event_handler
-    };
-        
-    esp_http_client_handle_t client = esp_http_client_init(&config_get);
-    ESP_ERROR_CHECK(esp_http_client_perform(client));
-    ESP_ERROR_CHECK(esp_http_client_cleanup(client));
-}
-
-/*esp_err_t client_event_get_handler(esp_http_client_event_handle_t evt)
-{	
-	char trueStr [] = "true";
-	
-	switch (evt->event_id)
-	{
-		case HTTP_EVENT_ON_DATA:
-			printf("HTTP_EVENT_ON_DATA: %.*s\n", evt->data_len, (char *)evt->data);
-			const char * dados = (char *)evt->data;
-			char * find = strstr(dados, trueStr);
-			
-			if (find)
-			{	
-				ESP_LOGI(TAG,"Transicionando Ac");
-				acTurnOff = !acTurnOff;
-			}
-			break;
-			
-		default:
-			break;
-	}
-	return ESP_OK;
-}*/
-
 static void taskLDR(void)
 {
-	//printf("adc1");
 	adc1_config_width(ADC_WIDTH_12Bit);
-	adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_6db);
+	adc1_config_channel_atten(ADC1_CHANNEL_5, ADC_ATTEN_6db);
 	int value = 0;
 	while(1) 
 	{
-		value = adc1_get_raw(ADC1_CHANNEL_0);
-		printf("value: %d", value);
-		
-		vTaskDelay(5000/portTICK_PERIOD_MS);
+		value = adc1_get_raw(ADC1_CHANNEL_5);
+		//printf("value: %d", value);
+		ESP_LOGI(TAG, "Value %d\n", value);
+		vTaskDelay(2000/portTICK_PERIOD_MS);
 	}
 	vTaskDelete(NULL);
 }
@@ -273,20 +194,118 @@ static void taskLED(void)
 	
 	while(1)
 	{
-		ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_RED_CH,	color_R,	0); 
-		ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_GREEN_CH,	color_G,	0); 
-		ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_BLUE_CH,	color_B,	0); 
-		//ledc_turn_off();
+		if (Light)
+		{
+			ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_RED_CH,	color_R,	0); 
+			ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_GREEN_CH,	color_G,	0); 
+			ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_BLUE_CH,	color_B,	0);
+		}	else {
+			ledc_turn_off();
+		}			
+		
 		vTaskDelay(5000/portTICK_PERIOD_MS);
 	}
 	vTaskDelete(NULL);
 }
+
+esp_err_t _http_event_handler(esp_http_client_event_t *evt)
+{
+    switch (evt->event_id)
+    {
+		case HTTP_EVENT_ON_DATA:
+
+			if (mode == 1)
+			{
+				printf("HTTP_EVENT_ON_DATA: %.*s\n", evt->data_len, (char *)evt->data);
+				const char * buff = (char *)evt->data;
+				const cJSON * raw_data = NULL;
+				cJSON *_json = cJSON_Parse(buff);
+				
+				raw_data = cJSON_GetObjectItemCaseSensitive(_json, "rgb");
+				
+				const char * data = (char *)raw_data->valuestring;
+				printf("Checking Color \"%s\"\n", data);
+				
+				//////////////////////////////////////////////////
+				char temp[3];
+				int temp_color = 0;
+				
+				for(int i = 0; i<3; i++)
+				{
+					strncpy ( temp, data+(i*2), 2);
+					temp_color = strtol(temp, NULL, 16);
+					if(i==0)
+						color_R = (8191 * temp_color)/255;
+					else if (i==1)
+						color_G = (8191 * temp_color)/255;
+					else
+						color_B = (8191 * temp_color)/255;
+				}
+				//////////////////////////////////////////////////
+				cJSON_Delete(_json);
+			} else if (mode == 2) {
+				printf("HTTP_EVENT_ON_DATA: %.*s\n", evt->data_len, (char *)evt->data);
+				const char * buff = (char *)evt->data;
+				const cJSON * raw_data = NULL;
+				cJSON *_json = cJSON_Parse(buff);
+				
+				raw_data = cJSON_GetObjectItemCaseSensitive(_json, "light");
+				Light = (bool)raw_data->valueint;
+				//printf("Checking Light \"%d\"\n", data);
+				
+				cJSON_Delete(_json);
+			}
+			
+			break;
+
+		default:
+			break;
+    }
+    return ESP_OK;   
+}
+
+void rest_get(){
+	char * url = "https://backendesp.vercel.app/getRgb";
+	switch (mode)
+    {
+		case 1:
+			url = "https://backendesp.vercel.app/getRgb";
+			break;
+		case 2:
+			url = "https://backendesp.vercel.app/getLight";
+			break;
+		default:
+			url = "https://backendesp.vercel.app/getRgb";
+			break;
+	}
+	
+    esp_http_client_config_t config_get = {
+      .url = url,
+        .method = HTTP_METHOD_GET,
+        .cert_pem = NULL,
+        .event_handler = _http_event_handler
+    };
+        
+    esp_http_client_handle_t client = esp_http_client_init(&config_get);
+    ESP_ERROR_CHECK(esp_http_client_perform(client));
+    ESP_ERROR_CHECK(esp_http_client_cleanup(client));
+}
+
 static void taskServerUpdate(void)
 {
 	while(1)
 	{
-		rest_get();
-		
+		if (WiFi)
+		{
+			mode = 1;
+			rest_get();
+			
+			mode = 2;
+			rest_get();
+		} else {
+			ESP_LOGI(TAG, "WiFi Off... trying to reconnect...");
+			vTaskDelay(5000/portTICK_PERIOD_MS);
+		}
 		vTaskDelay(1000/portTICK_PERIOD_MS);
 	}
 	vTaskDelete(NULL);
@@ -310,19 +329,8 @@ void app_main(void)
 	wifi_connection();
     vTaskDelay(5000.0 / portTICK_PERIOD_MS);
 	
-	//rest_get();
-	
-	/*gpio_set_direction(GPIO_NUM_12, GPIO_MODE_INPUT);
-    int value = 0;
-	while(1) 
-	{
-		value = gpio_get_level(GPIO_NUM_12);
-		printf("valor:%d\n",value);
-		vTaskDelay(1000/portTICK_PERIOD_MS);
-	}*/
-
-	//xTaskCreate(taskPIR, 			"taskPIR", 			10000, NULL, 2, NULL); //ESP_LOGI(TAG, "BTN high watermark %d\n", uxTaskGetStackHighWaterMark( NULL ) );
-	//xTaskCreate(taskLDR, 			"taskLDR", 			10000, NULL, 3, NULL);
-	xTaskCreate(taskLED, 			"taskLED", 			10000, NULL, 4, NULL);
-	xTaskCreate(taskServerUpdate, 	"taskServerUpdate", 10000, NULL, 5, NULL);
+	xTaskCreatePinnedToCore(taskPIR, 			"taskPIR", 			10000, NULL, 3, NULL, 0);//ESP_LOGI(TAG, "BTN high watermark %d\n", uxTaskGetStackHighWaterMark( NULL ) );
+	xTaskCreatePinnedToCore(taskLDR, 			"taskLDR", 			10000, NULL, 3, NULL, 0);
+	xTaskCreatePinnedToCore(taskLED, 			"taskLED", 			10000, NULL, 2, NULL, 1);
+	xTaskCreatePinnedToCore(taskServerUpdate, 	"taskServerUpdate", 10000, NULL, 5, NULL, 1);
 }
