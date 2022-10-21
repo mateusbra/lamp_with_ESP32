@@ -40,13 +40,19 @@ int color_R = 8191; //8191 = 255
 int color_G = 8191;
 int color_B = 8191;
 uint8_t mode = 0;
-bool WiFi = 0;
-bool Light = 0;
+bool WiFi 	= 0;
+bool Light 	= 0;
+bool motion = 0;
+bool manualMode = 0;
+int ambientLight = 500; //500->high light | 4000->low light
+bool lightBefore = 0;
+
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) 
 	{
+		WiFi = 0;
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) 
 	{
@@ -98,18 +104,70 @@ static void wifi_connection()
     esp_http_client_handle_t client = esp_http_client_init(&config_get);
     ESP_ERROR_CHECK(esp_http_client_perform(client));
     ESP_ERROR_CHECK(esp_http_client_cleanup(client));
-}*/
+}*/ //Teste
+
+void rest_post(){
+	int tempAmbientLight = 0;
+	char * url = "https://backendesp.vercel.app/setMotion?motion=true";
+	const char * auxUrl = "https://backendesp.vercel.app/setLumin?luminosity=";
+    
+	for (int i = 0; i< 2; i++)
+	{	
+		if (i == 0)
+		{
+			if (motion)
+				url = "https://backendesp.vercel.app/setMotion?motion=true";
+			else 
+				url = "https://backendesp.vercel.app/setMotion?motion=false";
+		} else if (i == 1) 
+		{
+			tempAmbientLight = (ambientLight * 100)/4000;
+			tempAmbientLight =100 - tempAmbientLight;
+			
+			int len_ = snprintf(NULL, 0, "%d", tempAmbientLight);
+			char *tempServer = (char *)malloc(len_ + 1);
+			snprintf(tempServer, len_+1, "%d", tempAmbientLight);
+			
+			ESP_LOGI(TAG, "VALOR LUZ AMBIENTE %s\n", tempServer);
+
+			url = (char *)malloc(strlen(auxUrl)+strlen(tempServer));
+			
+			strcpy(url, auxUrl);
+			strcat(url, tempServer);
+		}
+		else if (i == 2)
+		{
+			if (Light)
+				url = "https://backendesp.vercel.app/setLight?light=true";
+			else 
+				url = "https://backendesp.vercel.app/setLight?light=false";
+		}
+		
+		esp_http_client_config_t config_post = {
+			.url = url,
+			.method = HTTP_METHOD_POST,
+			.event_handler = NULL
+		};
+		
+		esp_http_client_handle_t client = esp_http_client_init(&config_post);
+		esp_http_client_perform(client);
+		esp_http_client_cleanup(client);
+	}
+	free(url);
+}
 
 static void taskLDR(void)
 {
 	adc1_config_width(ADC_WIDTH_12Bit);
 	adc1_config_channel_atten(ADC1_CHANNEL_5, ADC_ATTEN_6db);
-	int value = 0;
 	while(1) 
 	{
-		value = adc1_get_raw(ADC1_CHANNEL_5);
-		//printf("value: %d", value);
-		ESP_LOGI(TAG, "Value %d\n", value);
+		ambientLight = adc1_get_raw(ADC1_CHANNEL_5);
+		
+		if (ambientLight > 4000)
+			ambientLight = 4000;
+		
+		ESP_LOGI(TAG, "Value %d\n", ambientLight);
 		vTaskDelay(2000/portTICK_PERIOD_MS);
 	}
 	vTaskDelete(NULL);
@@ -118,11 +176,12 @@ static void taskLDR(void)
 static void taskPIR(void)
 {
 	gpio_set_direction(GPIO_NUM_12, GPIO_MODE_INPUT);
-    int value = 0;
 	while(1) 
 	{
-		value = gpio_get_level(GPIO_NUM_12);
-		printf("valor:%d\n",value);
+		motion = gpio_get_level(GPIO_NUM_12);
+		
+		printf("valor:%d\n", motion);
+		
 		vTaskDelay(2000/portTICK_PERIOD_MS);
 	}
 	vTaskDelete(NULL); 
@@ -182,7 +241,6 @@ void ledc_init()
 
 void ledc_turn_off()
 {
-		//close 
 		ledc_stop(LEDC_LOW_SPEED_MODE,LED_RED_CH,0); 
 		ledc_stop(LEDC_LOW_SPEED_MODE,LED_GREEN_CH,0); 
 		ledc_stop(LEDC_LOW_SPEED_MODE,LED_BLUE_CH,0); 
@@ -194,15 +252,30 @@ static void taskLED(void)
 	
 	while(1)
 	{
-		if (Light)
+		if (manualMode)
 		{
-			ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_RED_CH,	color_R,	0); 
-			ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_GREEN_CH,	color_G,	0); 
-			ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_BLUE_CH,	color_B,	0);
-		}	else {
-			ledc_turn_off();
-		}			
-		
+			if (Light)
+			{
+				ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_RED_CH,	color_R,	0); 
+				ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_GREEN_CH,	color_G,	0); 
+				ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_BLUE_CH,	color_B,	0);
+			}	else 
+			{
+				ledc_turn_off();
+			}			
+		} else {
+			if (((ambientLight > 2000) || lightBefore) && motion)
+			{
+				lightBefore = 1;
+				ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_RED_CH,	color_R,	0); 
+				ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_GREEN_CH,	color_G,	0); 
+				ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_BLUE_CH,	color_B,	0);
+				vTaskDelay(10000/portTICK_PERIOD_MS); //Definir tempo que a luz ficará acessa
+			} 	else {
+				ledc_turn_off();
+				lightBefore = 0;
+			}
+		}
 		vTaskDelay(5000/portTICK_PERIOD_MS);
 	}
 	vTaskDelete(NULL);
@@ -226,7 +299,6 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 				const char * data = (char *)raw_data->valuestring;
 				printf("Checking Color \"%s\"\n", data);
 				
-				//////////////////////////////////////////////////
 				char temp[3];
 				int temp_color = 0;
 				
@@ -241,9 +313,10 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 					else
 						color_B = (8191 * temp_color)/255;
 				}
-				//////////////////////////////////////////////////
+				
 				cJSON_Delete(_json);
-			} else if (mode == 2) {
+			} else if (mode == 2) 
+			{
 				printf("HTTP_EVENT_ON_DATA: %.*s\n", evt->data_len, (char *)evt->data);
 				const char * buff = (char *)evt->data;
 				const cJSON * raw_data = NULL;
@@ -252,10 +325,20 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 				raw_data = cJSON_GetObjectItemCaseSensitive(_json, "light");
 				Light = (bool)raw_data->valueint;
 				//printf("Checking Light \"%d\"\n", data);
+				cJSON_Delete(_json);
+			} else if (mode == 3)
+			{
+				printf("HTTP_EVENT_ON_DATA: %.*s\n", evt->data_len, (char *)evt->data);
+				const char * buff = (char *)evt->data;
+				const cJSON * raw_data = NULL;
+				cJSON *_json = cJSON_Parse(buff);
 				
+				raw_data = cJSON_GetObjectItemCaseSensitive(_json, "mode");
+				manualMode = (bool)raw_data->valueint;
+				//printf("Checking mode \"%d\"\n", data);
 				cJSON_Delete(_json);
 			}
-			
+
 			break;
 
 		default:
@@ -264,7 +347,8 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;   
 }
 
-void rest_get(){
+void rest_get()
+{
 	char * url = "https://backendesp.vercel.app/getRgb";
 	switch (mode)
     {
@@ -273,6 +357,9 @@ void rest_get(){
 			break;
 		case 2:
 			url = "https://backendesp.vercel.app/getLight";
+			break;
+		case 3:
+			url = "https://backendesp.vercel.app/getMode";
 			break;
 		default:
 			url = "https://backendesp.vercel.app/getRgb";
@@ -300,9 +387,18 @@ static void taskServerUpdate(void)
 			mode = 1;
 			rest_get();
 			
-			mode = 2;
+			if (manualMode)
+			{
+				mode = 2;
+				rest_get();
+			}
+			
+			mode = 3;
 			rest_get();
-		} else {
+			
+			rest_post();
+		} else 
+		{
 			ESP_LOGI(TAG, "WiFi Off... trying to reconnect...");
 			vTaskDelay(5000/portTICK_PERIOD_MS);
 		}
