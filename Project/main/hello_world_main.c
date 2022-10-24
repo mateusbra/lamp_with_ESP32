@@ -136,7 +136,7 @@ void rest_post(){
 				url = "https://backendesp.vercel.app/setMotion?motion=false";
 		} else if (i == 1) 
 		{
-			tempAmbientLight = (ambientLight * 100)/4000;
+			tempAmbientLight = (ambientLight * 100)/4095;
 			tempAmbientLight =100 - tempAmbientLight;
 			
 			int len_ = snprintf(NULL, 0, "%d", tempAmbientLight);
@@ -180,9 +180,6 @@ static void taskLDR(void)
 	{
 		ambientLight = adc1_get_raw(ADC1_CHANNEL_5);
 		ESP_LOGI(TAG_LDR, "Value of ambientLight: %d\n", ambientLight);
-		if (ambientLight > 4000)
-			ambientLight = 4000;
-		
 
 		vTaskDelay(2000/portTICK_PERIOD_MS);
 	}
