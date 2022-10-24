@@ -121,6 +121,7 @@ static void wifi_connection()
     ESP_ERROR_CHECK(esp_http_client_cleanup(client));
 }*/ //Teste
 
+///Handle do POST
 void rest_post(){
 	int tempAmbientLight = 0;
 	char * url = "https://backendesp.vercel.app/setMotion?motion=true";
@@ -172,6 +173,7 @@ void rest_post(){
 	
 }
 
+///Converte via ADC o valor de analógico para digital
 static void taskLDR(void)
 {
 	adc1_config_width(ADC_WIDTH_12Bit);
@@ -186,6 +188,7 @@ static void taskLDR(void)
 	vTaskDelete(NULL);
 }
 
+///Handle da interrupção
 static void IRAM_ATTR gpio_interrupt_handler(void *args)
 {
 	int pinNumber = (int)args;
@@ -195,7 +198,7 @@ static void IRAM_ATTR gpio_interrupt_handler(void *args)
 
 static void taskPIR(void)
 {
-	ESP_LOGI(TAG, "taskPIR Enter high watermark %d\n", uxTaskGetStackHighWaterMark( NULL ) );
+	//ESP_LOGI(TAG, "taskPIR Enter high watermark %d\n", uxTaskGetStackHighWaterMark( NULL ) );
 	interruptQueue = xQueueCreate(10, sizeof(int));
 	
 	gpio_pad_select_gpio(INPUT_PIN);
@@ -205,13 +208,13 @@ static void taskPIR(void)
 	gpio_set_intr_type(INPUT_PIN, GPIO_INTR_POSEDGE);
 	
 	gpio_install_isr_service(0);
-	gpio_isr_handler_add(INPUT_PIN, gpio_interrupt_handler, (void *)INPUT_PIN);
+	gpio_isr_handler_add(INPUT_PIN, gpio_interrupt_handler, (void *)INPUT_PIN);//Adiciona interrupção no pino de detecção
 	
 	
 	int pinNumber;
 	while(1)
 	{
-		if(xQueueReceive(interruptQueue, &pinNumber, portMAX_DELAY))
+		if(xQueueReceive(interruptQueue, &pinNumber, portMAX_DELAY))//Se houver uma detecção no pino faz a interrupção
 		{
 			motion = 1;
 			httpBlock = 0;
@@ -293,14 +296,14 @@ static void taskLED(void)
 			httpBlock = 0;
 			if (Light)
 			{
-				while (count < 20)
+				while (count < 20) //Laço utilizado para ser atualizado a cor enquanto a luz estiver acesa
 				{
 					
 					ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_RED_CH,	color_R,	0); 
 					ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_GREEN_CH,	color_G,	0); 
 					ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_BLUE_CH,	color_B,	0);
 					count += 1;
-					vTaskDelay(250/portTICK_PERIOD_MS);
+					vTaskDelay(250/portTICK_PERIOD_MS); //Verificação de cor a cada 250ms
 				}
 				count = 0;
 			}	else 
@@ -310,17 +313,17 @@ static void taskLED(void)
 			}			
 		} else 
 		{
-			if (((ambientLight > 2000) || lightBefore) && motion)
-			{
-				lightBefore = 1;
+			if (((ambientLight > 2000) || lightBefore) && motion) //Se a luz ambiente estiver acima de 2k, é considerado escuro 4095 é o máximo 0 o mínimo
+			{													  //E se o movimento for detectado é aceso a luz. lightBefore server para manter a luz acesa
+				lightBefore = 1;								  //Caso tenha sido ligada, acontece mais um movimento o lightBefore garantira que permaneça ligada
 				motion = 0;
-				while(count < 40)
+				while(count < 40) //Laço utilizado para ser atualizado a cor enquanto a luz estiver acesa
 				{
 					ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_RED_CH,	color_R,	0); 
 					ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_GREEN_CH,	color_G,	0); 
 					ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_BLUE_CH,	color_B,	0);
 					count += 1;
-					vTaskDelay(250/portTICK_PERIOD_MS); //Tempo de luz acesa 20s
+					vTaskDelay(250/portTICK_PERIOD_MS); //Tempo de luz acesa 10s Verificação de cor a cada 250ms
 				}
 				count = 0;
 			} 	else 
@@ -335,6 +338,7 @@ static void taskLED(void)
 	vTaskDelete(NULL);
 }
 
+///Faz o tratameno do GET
 esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 {
     switch (evt->event_id)
@@ -347,14 +351,15 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 			
 			if (mode == 1)
 			{
-				raw_data = cJSON_GetObjectItemCaseSensitive(_json, "rgb");
+				raw_data = cJSON_GetObjectItemCaseSensitive(_json, "rgb"); //Recebe o JSON
 				
-				const char * data = (char *)raw_data->valuestring;
+				const char * data = (char *)raw_data->valuestring;         //Faz o parse para pegar apenas a cor em HEX
 				ESP_LOGI(TAG_SERVER, "Checking Color \"%s\"\n", data);
 				
 				char temp[3];
 				int temp_color = 0;
 				
+				///Converte via regra de 3 a cor de HEX para inteiro onde 255 é o máximo de cada cor, e o máximo do PWM é 8191
 				for(int i = 0; i<3; i++)
 				{
 					strncpy ( temp, data+(i*2), 2);
@@ -368,12 +373,12 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 				}
 			} else if (mode == 2) 
 			{
-				raw_data = cJSON_GetObjectItemCaseSensitive(_json, "light");
-				Light = (bool)raw_data->valueint;
+				raw_data = cJSON_GetObjectItemCaseSensitive(_json, "light");//Recebe JSON da luz
+				Light = (bool)raw_data->valueint;//Faz o parse para pegar valor da luz
 			} else if (mode == 3)
 			{				
-				raw_data = cJSON_GetObjectItemCaseSensitive(_json, "mode");
-				autoMode = (bool)raw_data->valueint;
+				raw_data = cJSON_GetObjectItemCaseSensitive(_json, "mode"); //Recebe JSON do modo
+				autoMode = (bool)raw_data->valueint;//Faz parse para obter modo
 			}
 			cJSON_Delete(_json);
 			break;
@@ -384,6 +389,7 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;   
 }
 
+///Faz o GET do HTTP de acordo com as URLs
 void rest_get()
 {
 	char * url = "https://backendesp.vercel.app/getRgb";
@@ -420,31 +426,31 @@ static void taskServerUpdate(void)
 	while(1)
 	{
 
-		if (WiFi)
+		if (WiFi)//Verifica conexão com WiFo
 		{
-			if(!httpBlock)
+			if(!httpBlock)//Verifica se as requisições http não estão bloqueadas
 			{
-				httpBusy = 1;
-				mode = 1;
+				httpBusy = 1;//Ativa http ocupado
+				mode = 1;	//recebe cor RGB em HEX
 				rest_get();
 				
-				mode = 3;
+				mode = 3;	//Recebe modo de operação em automático ou manual
 				rest_get();
 				
 				if (!autoMode)
 				{
-					mode = 2;
+					mode = 2; //Recebe se a luz está ativa ou apagada se o modo manual estiver ativo
 					rest_get();
 				}
 							
-				rest_post();
+				rest_post(); //Faz o envio de dados via POST
 			}
 		} else 
 		{
 			ESP_LOGI(TAG, "WiFi Off... trying to reconnect...");
 			vTaskDelay(5000/portTICK_PERIOD_MS);
 		}
-		httpBusy = 0;
+		httpBusy = 0;//Libera o http
 		vTaskDelay(1000/portTICK_PERIOD_MS);
 		//ESP_LOGI(TAG_SERVER, "taskServer Exit high watermark (free memory): %d\n", uxTaskGetStackHighWaterMark( NULL ) );
 	}
@@ -454,16 +460,16 @@ static void taskServerUpdate(void)
 static void taskSleep(void)
 {
 	esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_AUTO);
-	esp_sleep_enable_ext0_wakeup(INPUT_PIN, 1);
-	vTaskDelay(30000/portTICK_PERIOD_MS);
+	esp_sleep_enable_ext0_wakeup(INPUT_PIN, 1);	//Configuração para acordar no mesmo pino da datecção de movimento
+	vTaskDelay(30000/portTICK_PERIOD_MS);		//Esperar 30s após ser ligado
 	while(1)
 	{
-		httpBlock = 1;
-		if (motion==0 && autoMode==1 && lightBefore==0 && httpBusy==0)
+		httpBlock = 1;							//Bloqueia requisição http para não interromper uma requisição no meio
+		if (motion==0 && autoMode==1 && lightBefore==0 && httpBusy==0)	//Se tiver  no modo automático e mais nenhuma função ativa, ativa o modo sleep
 		{
 			
 			ESP_LOGI(TAG_SLEEP, "Light sleep...\n");
-			vTaskSuspend(TaskHandleAll);
+			vTaskSuspend(TaskHandleAll);		//Suspende todas as tasks
 			//WiFi = 0;
 			motion = 0;
 			autoMode = 1;
@@ -472,25 +478,26 @@ static void taskSleep(void)
 			vTaskDelay(500/portTICK_PERIOD_MS);
 			
 			//esp_wifi_stop();
-			esp_light_sleep_start();
+			esp_light_sleep_start();			//Aciona sleep
 			
 			
 			vTaskDelay(5000/portTICK_PERIOD_MS);
-			motion = 1;
-			httpBlock = 0;
-			//esp_wifi_start();
-			vTaskResume(TaskHandleAll);
+			motion = 1;							//Volta já com a detecção de movimento ativa
+			httpBlock = 0;						//Desbloqueia o http
+			//esp_wifi_start();	
+			vTaskResume(TaskHandleAll);			//Volta todas as tasks
 		}
 		//ESP_LOGI(TAG_SLEEP, "taskSleep Exit high watermark (free memory): %d\n", uxTaskGetStackHighWaterMark( NULL ) );
-		vTaskDelay(30000/portTICK_PERIOD_MS);
+		vTaskDelay(30000/portTICK_PERIOD_MS);	//Espera 30s
 	}
 	
-	vTaskDelete(NULL);
+	vTaskDelete(NULL); //Estado nunca atingido, apenas por segurança
 }
 
 void app_main(void)
 {
-	esp_err_t	ret = nvs_flash_init();
+	///Utilizado para configuração do WiFi
+	esp_err_t	ret = nvs_flash_init(); 
 	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) 
 	{
       ESP_ERROR_CHECK(nvs_flash_erase());
@@ -504,6 +511,7 @@ void app_main(void)
     esp_log_level_set("*", ESP_LOG_INFO);
     
 	wifi_connection();
+	///
     vTaskDelay(5000.0 / portTICK_PERIOD_MS);
 	
 	xTaskCreatePinnedToCore(taskPIR, 			"taskPIR", 			 2600, NULL, 2, &TaskHandleAll, 0);
