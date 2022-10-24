@@ -4,6 +4,10 @@
 #include "driver/gpio.h"
 #include "sdkconfig.h"
 
+#include "freertos/queue.h"
+
+#include "esp_sleep.h"
+
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "wifiCred.h" //Store SSID and PASS
@@ -28,13 +32,19 @@
 #define LED_GREEN_PIN    2
 #define LED_BLUE_PIN     4
 
-//static const char *TAG = "HTTP_CLIENT";
 #define DEFAULT_RSSI -127
 #define DEFAULT_AUTHMODE WIFI_AUTH_WPA2_PSK
 #define DEFAULT_SCAN_METHOD WIFI_FAST_SCAN
 #define DEFAULT_SORT_METHOD WIFI_CONNECT_AP_BY_SIGNAL
 
+TaskHandle_t TaskHandleAll;
+
 static const char *TAG = "WiFi";
+static const char *TAG_LDR = "LDR";
+static const char *TAG_LED = "LED";
+static const char *TAG_SERVER = "TAG_SERVER";
+static const char *TAG_SLEEP = "TAG_SLEEP";
+static const char *TAG_MOTION = "TAG_MOTION";
 
 int color_R = 8191; //8191 = 255
 int color_G = 8191;
@@ -42,11 +52,16 @@ int color_B = 8191;
 uint8_t mode = 0;
 bool WiFi 	= 0;
 bool Light 	= 0;
-bool motion = 0;
-bool manualMode = 0;
-int ambientLight = 500; //500->high light | 4000->low light
+bool motion = 1;
+bool motionBefore = 0;
+bool autoMode = 1;
+int ambientLight = 0; //0->high light | 4000->low light
 bool lightBefore = 0;
+bool httpBusy = 0;
+bool httpBlock = 0;
 
+#define INPUT_PIN 32
+xQueueHandle interruptQueue;
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
@@ -127,13 +142,12 @@ void rest_post(){
 			int len_ = snprintf(NULL, 0, "%d", tempAmbientLight);
 			char *tempServer = (char *)malloc(len_ + 1);
 			snprintf(tempServer, len_+1, "%d", tempAmbientLight);
-			
-			ESP_LOGI(TAG, "VALOR LUZ AMBIENTE %s\n", tempServer);
 
-			url = (char *)malloc(strlen(auxUrl)+strlen(tempServer));
+			url = (char *)malloc(strlen(auxUrl)+(len_+1));
 			
 			strcpy(url, auxUrl);
 			strcat(url, tempServer);
+			free(tempServer);
 		}
 		else if (i == 2)
 		{
@@ -152,8 +166,10 @@ void rest_post(){
 		esp_http_client_handle_t client = esp_http_client_init(&config_post);
 		esp_http_client_perform(client);
 		esp_http_client_cleanup(client);
+		if(i == 1)
+			free(url);
 	}
-	free(url);
+	
 }
 
 static void taskLDR(void)
@@ -163,28 +179,50 @@ static void taskLDR(void)
 	while(1) 
 	{
 		ambientLight = adc1_get_raw(ADC1_CHANNEL_5);
-		
+		ESP_LOGI(TAG_LDR, "Value of ambientLight: %d\n", ambientLight);
 		if (ambientLight > 4000)
 			ambientLight = 4000;
 		
-		ESP_LOGI(TAG, "Value %d\n", ambientLight);
+
 		vTaskDelay(2000/portTICK_PERIOD_MS);
 	}
 	vTaskDelete(NULL);
 }
 
+static void IRAM_ATTR gpio_interrupt_handler(void *args)
+{
+	int pinNumber = (int)args;
+	xQueueSendFromISR(interruptQueue, &pinNumber, NULL);
+}
+
+
 static void taskPIR(void)
 {
-	gpio_set_direction(GPIO_NUM_12, GPIO_MODE_INPUT);
-	while(1) 
+	ESP_LOGI(TAG, "taskPIR Enter high watermark %d\n", uxTaskGetStackHighWaterMark( NULL ) );
+	interruptQueue = xQueueCreate(10, sizeof(int));
+	
+	gpio_pad_select_gpio(INPUT_PIN);
+	gpio_set_direction(INPUT_PIN, GPIO_MODE_INPUT);
+	gpio_pulldown_dis(INPUT_PIN);
+	gpio_pullup_dis(INPUT_PIN);
+	gpio_set_intr_type(INPUT_PIN, GPIO_INTR_POSEDGE);
+	
+	gpio_install_isr_service(0);
+	gpio_isr_handler_add(INPUT_PIN, gpio_interrupt_handler, (void *)INPUT_PIN);
+	
+	
+	int pinNumber;
+	while(1)
 	{
-		motion = gpio_get_level(GPIO_NUM_12);
-		
-		printf("valor:%d\n", motion);
-		
-		vTaskDelay(2000/portTICK_PERIOD_MS);
+		if(xQueueReceive(interruptQueue, &pinNumber, portMAX_DELAY))
+		{
+			motion = 1;
+			httpBlock = 0;
+			ESP_LOGI(TAG_MOTION, "Motion detected!\n");
+		}
 	}
-	vTaskDelete(NULL); 
+	
+	vTaskDelete(NULL);
 }
 
 void ledc_init()
@@ -249,34 +287,53 @@ void ledc_turn_off()
 static void taskLED(void)
 {
 	ledc_init();
+	int count = 0;
 	
 	while(1)
 	{
-		if (manualMode)
+		if (!autoMode)
 		{
+			httpBlock = 0;
 			if (Light)
 			{
-				ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_RED_CH,	color_R,	0); 
-				ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_GREEN_CH,	color_G,	0); 
-				ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_BLUE_CH,	color_B,	0);
+				while (count < 20)
+				{
+					
+					ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_RED_CH,	color_R,	0); 
+					ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_GREEN_CH,	color_G,	0); 
+					ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_BLUE_CH,	color_B,	0);
+					count += 1;
+					vTaskDelay(250/portTICK_PERIOD_MS);
+				}
+				count = 0;
 			}	else 
 			{
 				ledc_turn_off();
+				vTaskDelay(5000/portTICK_PERIOD_MS);
 			}			
-		} else {
+		} else 
+		{
 			if (((ambientLight > 2000) || lightBefore) && motion)
 			{
 				lightBefore = 1;
-				ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_RED_CH,	color_R,	0); 
-				ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_GREEN_CH,	color_G,	0); 
-				ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_BLUE_CH,	color_B,	0);
-				vTaskDelay(10000/portTICK_PERIOD_MS); //Definir tempo que a luz ficará acessa
-			} 	else {
+				motion = 0;
+				while(count < 40)
+				{
+					ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_RED_CH,	color_R,	0); 
+					ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_GREEN_CH,	color_G,	0); 
+					ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE,LED_BLUE_CH,	color_B,	0);
+					count += 1;
+					vTaskDelay(250/portTICK_PERIOD_MS); //Tempo de luz acesa 20s
+				}
+				count = 0;
+			} 	else 
+			{
 				ledc_turn_off();
 				lightBefore = 0;
+				motion = 0;
+				vTaskDelay(5000/portTICK_PERIOD_MS);
 			}
 		}
-		vTaskDelay(5000/portTICK_PERIOD_MS);
 	}
 	vTaskDelete(NULL);
 }
@@ -286,18 +343,17 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
     switch (evt->event_id)
     {
 		case HTTP_EVENT_ON_DATA:
-
+			ESP_LOGI(TAG_SERVER, "HTTP_EVENT_ON_DATA: %.*s\n", evt->data_len, (char *)evt->data);
+			const char * buff = (char *)evt->data;
+			const cJSON * raw_data = NULL;
+			cJSON *_json = cJSON_Parse(buff);
+			
 			if (mode == 1)
 			{
-				printf("HTTP_EVENT_ON_DATA: %.*s\n", evt->data_len, (char *)evt->data);
-				const char * buff = (char *)evt->data;
-				const cJSON * raw_data = NULL;
-				cJSON *_json = cJSON_Parse(buff);
-				
 				raw_data = cJSON_GetObjectItemCaseSensitive(_json, "rgb");
 				
 				const char * data = (char *)raw_data->valuestring;
-				printf("Checking Color \"%s\"\n", data);
+				ESP_LOGI(TAG_SERVER, "Checking Color \"%s\"\n", data);
 				
 				char temp[3];
 				int temp_color = 0;
@@ -313,32 +369,16 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 					else
 						color_B = (8191 * temp_color)/255;
 				}
-				
-				cJSON_Delete(_json);
 			} else if (mode == 2) 
 			{
-				printf("HTTP_EVENT_ON_DATA: %.*s\n", evt->data_len, (char *)evt->data);
-				const char * buff = (char *)evt->data;
-				const cJSON * raw_data = NULL;
-				cJSON *_json = cJSON_Parse(buff);
-				
 				raw_data = cJSON_GetObjectItemCaseSensitive(_json, "light");
 				Light = (bool)raw_data->valueint;
-				//printf("Checking Light \"%d\"\n", data);
-				cJSON_Delete(_json);
 			} else if (mode == 3)
-			{
-				printf("HTTP_EVENT_ON_DATA: %.*s\n", evt->data_len, (char *)evt->data);
-				const char * buff = (char *)evt->data;
-				const cJSON * raw_data = NULL;
-				cJSON *_json = cJSON_Parse(buff);
-				
+			{				
 				raw_data = cJSON_GetObjectItemCaseSensitive(_json, "mode");
-				manualMode = (bool)raw_data->valueint;
-				//printf("Checking mode \"%d\"\n", data);
-				cJSON_Delete(_json);
+				autoMode = (bool)raw_data->valueint;
 			}
-
+			cJSON_Delete(_json);
 			break;
 
 		default:
@@ -382,28 +422,72 @@ static void taskServerUpdate(void)
 {
 	while(1)
 	{
+
 		if (WiFi)
 		{
-			mode = 1;
-			rest_get();
-			
-			if (manualMode)
+			if(!httpBlock)
 			{
-				mode = 2;
+				httpBusy = 1;
+				mode = 1;
 				rest_get();
+				
+				mode = 3;
+				rest_get();
+				
+				if (!autoMode)
+				{
+					mode = 2;
+					rest_get();
+				}
+							
+				rest_post();
 			}
-			
-			mode = 3;
-			rest_get();
-			
-			rest_post();
 		} else 
 		{
 			ESP_LOGI(TAG, "WiFi Off... trying to reconnect...");
 			vTaskDelay(5000/portTICK_PERIOD_MS);
 		}
+		httpBusy = 0;
 		vTaskDelay(1000/portTICK_PERIOD_MS);
+		//ESP_LOGI(TAG_SERVER, "taskServer Exit high watermark (free memory): %d\n", uxTaskGetStackHighWaterMark( NULL ) );
 	}
+	vTaskDelete(NULL);
+}
+
+static void taskSleep(void)
+{
+	esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_AUTO);
+	esp_sleep_enable_ext0_wakeup(INPUT_PIN, 1);
+	vTaskDelay(30000/portTICK_PERIOD_MS);
+	while(1)
+	{
+		httpBlock = 1;
+		if (motion==0 && autoMode==1 && lightBefore==0 && httpBusy==0)
+		{
+			
+			ESP_LOGI(TAG_SLEEP, "Light sleep...\n");
+			vTaskSuspend(TaskHandleAll);
+			//WiFi = 0;
+			motion = 0;
+			autoMode = 1;
+			Light = 0;
+			lightBefore = 0;
+			vTaskDelay(500/portTICK_PERIOD_MS);
+			
+			//esp_wifi_stop();
+			esp_light_sleep_start();
+			
+			
+			vTaskDelay(5000/portTICK_PERIOD_MS);
+			motion = 1;
+			httpBlock = 0;
+			//esp_wifi_start();
+			vTaskResume(TaskHandleAll);
+		}
+		//ESP_LOGI(TAG_SLEEP, "taskSleep Exit high watermark (free memory): %d\n", uxTaskGetStackHighWaterMark( NULL ) );
+		vTaskDelay(30000/portTICK_PERIOD_MS);
+	}
+	
 	vTaskDelete(NULL);
 }
 
@@ -425,8 +509,9 @@ void app_main(void)
 	wifi_connection();
     vTaskDelay(5000.0 / portTICK_PERIOD_MS);
 	
-	xTaskCreatePinnedToCore(taskPIR, 			"taskPIR", 			10000, NULL, 3, NULL, 0);//ESP_LOGI(TAG, "BTN high watermark %d\n", uxTaskGetStackHighWaterMark( NULL ) );
-	xTaskCreatePinnedToCore(taskLDR, 			"taskLDR", 			10000, NULL, 3, NULL, 0);
-	xTaskCreatePinnedToCore(taskLED, 			"taskLED", 			10000, NULL, 2, NULL, 1);
-	xTaskCreatePinnedToCore(taskServerUpdate, 	"taskServerUpdate", 10000, NULL, 5, NULL, 1);
+	xTaskCreatePinnedToCore(taskPIR, 			"taskPIR", 			 2600, NULL, 2, &TaskHandleAll, 0);
+	xTaskCreatePinnedToCore(taskLDR, 			"taskLDR", 			 2600, NULL, 4, &TaskHandleAll, 0);
+	xTaskCreatePinnedToCore(taskLED, 			"taskLED", 			 2600, NULL, 3, &TaskHandleAll, 1);
+	xTaskCreatePinnedToCore(taskServerUpdate, 	"taskServerUpdate", 10000, NULL, 5, &TaskHandleAll, 1);
+	xTaskCreatePinnedToCore(taskSleep,			"taskSleep",		 2600, NULL, 6, NULL, 			1);
 }
